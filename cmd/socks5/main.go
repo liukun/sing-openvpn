@@ -18,6 +18,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	openvpn "github.com/airofm/sing-openvpn"
+	ovpnlog "github.com/airofm/sing-openvpn/internal/log"
 	"github.com/armon/go-socks5"
 )
 
@@ -27,7 +28,8 @@ type Config struct {
 }
 
 type SOCKS5Config struct {
-	Listen string `toml:"listen"`
+	Listen   string `toml:"listen"`
+	LogLevel string `toml:"log_level"`
 }
 
 type OpenVPNConfig struct {
@@ -60,6 +62,13 @@ func main() {
 	}
 	if cfg.SOCKS5.Listen == "" {
 		cfg.SOCKS5.Listen = "127.0.0.1:6080"
+	}
+	if cfg.SOCKS5.LogLevel != "" {
+		level, err := ovpnlog.ParseLevel(cfg.SOCKS5.LogLevel)
+		if err != nil {
+			log.Printf("warning: %v, using default (debug)", err)
+		}
+		ovpnlog.SetLevel(level)
 	}
 
 	ovpnContent, err := os.ReadFile(cfg.OpenVPN.OVPNFile)

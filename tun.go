@@ -56,7 +56,7 @@ func (c *Client) tunReadLoop() {
 				continue
 			}
 
-			log.Debugln("[OpenVPN] TUN read %d bytes, encrypted to %d bytes", sizes[i], len(ciphertext))
+			log.Traceln("[OpenVPN] TUN read %d bytes, encrypted to %d bytes", sizes[i], len(ciphertext))
 			p := &packet.Packet{
 				Opcode:  c.dataOpcode,
 				PeerID:  c.peerID,
@@ -86,10 +86,10 @@ func (c *Client) processIncomingData(data []byte) {
 		return
 	}
 
-	log.Debugln("[OpenVPN] TUN write: %d bytes plaintext", len(plaintext))
+	log.Traceln("[OpenVPN] TUN write: %d bytes plaintext", len(plaintext))
 
 	if len(plaintext) == 16 && bytes.Equal(plaintext, pingMagic) {
-		log.Debugln("[OpenVPN] Received OpenVPN ping")
+		log.Traceln("[OpenVPN] Received OpenVPN ping")
 		return
 	}
 
@@ -100,8 +100,10 @@ func (c *Client) processIncomingData(data []byte) {
 	// Only inject valid IP packets into the TUN stack.
 	ipVer := plaintext[0] >> 4
 	if ipVer != 4 && ipVer != 6 {
-		log.Debugln("[OpenVPN] Dropping non-IP payload (ver=%d, len=%d, hex=%s)",
-			ipVer, len(plaintext), hex.EncodeToString(plaintext[:min(len(plaintext), 20)]))
+		if log.IsTraceEnabled() {
+			log.Traceln("[OpenVPN] Dropping non-IP payload (ver=%d, len=%d, hex=%s)",
+				ipVer, len(plaintext), hex.EncodeToString(plaintext[:min(len(plaintext), 20)]))
+		}
 		return
 	}
 
@@ -110,17 +112,17 @@ func (c *Client) processIncomingData(data []byte) {
 		return
 	}
 
-	if ipVer == 4 && len(plaintext) >= 20 {
+	if log.IsTraceEnabled() && ipVer == 4 && len(plaintext) >= 20 {
 		srcIP := fmt.Sprintf("%d.%d.%d.%d", plaintext[12], plaintext[13], plaintext[14], plaintext[15])
 		dstIP := fmt.Sprintf("%d.%d.%d.%d", plaintext[16], plaintext[17], plaintext[18], plaintext[19])
-		log.Infoln("[OpenVPN] Decrypted IP in: src=%s dst=%s len=%d", srcIP, dstIP, len(plaintext))
+		log.Traceln("[OpenVPN] Decrypted IP in: src=%s dst=%s len=%d", srcIP, dstIP, len(plaintext))
 
 		proto := plaintext[9]
 		ipHdrLen := int(plaintext[0]&0x0f) * 4
 		if proto == 17 && len(plaintext) >= ipHdrLen+4 {
 			srcPort := uint16(plaintext[ipHdrLen])<<8 | uint16(plaintext[ipHdrLen+1])
 			if srcPort == 53 {
-				log.Infoln("[OpenVPN] DNS response in: src=%s:%d dst=%s len=%d", srcIP, srcPort, dstIP, len(plaintext))
+				log.Traceln("[OpenVPN] DNS response in: src=%s:%d dst=%s len=%d", srcIP, srcPort, dstIP, len(plaintext))
 			}
 		}
 	}

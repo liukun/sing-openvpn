@@ -93,7 +93,7 @@ func (c *Client) readLoop() {
 			return
 		}
 
-		log.Infoln("[OpenVPN] Received raw packet: len=%d, first_byte=%02x opcode=%d", len(data), data[0], data[0]>>3)
+		log.Traceln("[OpenVPN] Received raw packet: len=%d, first_byte=%02x opcode=%d", len(data), data[0], data[0]>>3)
 
 		// Control channel protection (tls-auth / tls-crypt)
 		if c.controlProtector != nil {
@@ -130,13 +130,15 @@ func (c *Client) readLoop() {
 
 func (c *Client) writePacket(p *packet.Packet) error {
 	data := p.Encode()
-	log.Debugln("[OpenVPN] Writing packet: %s, session ID: %x, packet ID: %d, len=%d", packet.OpcodeToString(p.Opcode), p.SessionID, p.PacketID, len(data))
-	if (p.Opcode == packet.OpDataV1 || p.Opcode == packet.OpDataV2) && len(data) > 0 {
-		dumpLen := 40
-		if len(data) < dumpLen {
-			dumpLen = len(data)
+	if log.IsTraceEnabled() {
+		log.Traceln("[OpenVPN] Writing packet: %s, session ID: %x, packet ID: %d, len=%d", packet.OpcodeToString(p.Opcode), p.SessionID, p.PacketID, len(data))
+		if (p.Opcode == packet.OpDataV1 || p.Opcode == packet.OpDataV2) && len(data) > 0 {
+			dumpLen := 40
+			if len(data) < dumpLen {
+				dumpLen = len(data)
+			}
+			log.Traceln("[OpenVPN] DATA packet hex: %s", hex.EncodeToString(data[:dumpLen]))
 		}
-		log.Debugln("[OpenVPN] DATA packet hex: %s", hex.EncodeToString(data[:dumpLen]))
 	}
 
 	// Control channel protection (tls-auth / tls-crypt)
@@ -166,7 +168,9 @@ func (c *Client) writePacket(p *packet.Packet) error {
 
 func (c *Client) handlePacket(p *packet.Packet) {
 	c.updateActivity()
-	log.Debugln("[OpenVPN] Received packet: %s, session ID: %x, packet ID: %d", packet.OpcodeToString(p.Opcode), p.SessionID, p.PacketID)
+	if log.IsTraceEnabled() {
+		log.Traceln("[OpenVPN] Received packet: %s, session ID: %x, packet ID: %d", packet.OpcodeToString(p.Opcode), p.SessionID, p.PacketID)
+	}
 
 	// Process ACKs for all control packets
 	if p.Opcode != packet.OpDataV1 && p.Opcode != packet.OpDataV2 {
@@ -198,11 +202,11 @@ func (c *Client) handlePacket(p *packet.Packet) {
 		c.sendAck(p.PacketID)
 		c.controlConn.FeedData(p.Payload)
 	case packet.OpAckV1:
-		log.Debugln("[OpenVPN] Received ACK for packet ID: %v", p.Acks)
+		log.Traceln("[OpenVPN] Received ACK for packet ID: %v", p.Acks)
 	case packet.OpDataV1, packet.OpDataV2:
 		// Data channel
 		// Pass to dataChan for tunWriteLoop to handle
-		log.Infoln("[OpenVPN] Received data packet: opcode=%d len=%d", p.Opcode, len(p.Payload))
+		log.Traceln("[OpenVPN] Received data packet: opcode=%d len=%d", p.Opcode, len(p.Payload))
 		c.processIncomingData(p.Payload)
 	}
 }

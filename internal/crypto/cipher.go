@@ -92,9 +92,9 @@ func (c *CBCCipher) Encrypt(plaintext []byte, _ []byte) ([]byte, error) {
 	copy(mac, calculatedMAC)
 	c.macPoolEnc.Put(h)
 
-	log.Debugln("[OpenVPN] CBC Encrypt: pid=%d, plaintext_len=%d, padded_len=%d, result_len=%d", pid, len(plaintext), paddedLen, len(result))
+	log.Traceln("[OpenVPN] CBC Encrypt: pid=%d, plaintext_len=%d, padded_len=%d, result_len=%d", pid, len(plaintext), paddedLen, len(result))
 	if len(ciphertext) <= 64 {
-		log.Debugln("[OpenVPN] CBC Encrypt: ciphertext=%s", hex.EncodeToString(ciphertext))
+		log.Traceln("[OpenVPN] CBC Encrypt: ciphertext=%s", hex.EncodeToString(ciphertext))
 	}
 
 	return result, nil

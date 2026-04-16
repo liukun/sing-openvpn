@@ -1,5 +1,7 @@
 [socks5]
 listen = "127.0.0.1:6080"
+# log_level: error, warn, info, debug, trace (default: debug)
+# log_level = "info"
 
 [openvpn]
 ovpn_file = "/path/to/client.ovpn"
