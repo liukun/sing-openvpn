@@ -28,8 +28,9 @@ type Config struct {
 }
 
 type SOCKS5Config struct {
-	Listen   string `toml:"listen"`
-	LogLevel string `toml:"log_level"`
+	Listen        string `toml:"listen"`
+	LogLevel      string `toml:"log_level"`
+	AutoReconnect *bool  `toml:"auto_reconnect"`
 }
 
 type OpenVPNConfig struct {
@@ -84,26 +85,34 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	autoReconnect := cfg.SOCKS5.AutoReconnect == nil || *cfg.SOCKS5.AutoReconnect
+
 	proxy := &vpnProxy{
-		ovpnContent: ovpnContent,
-		username:    cfg.OpenVPN.Username,
-		password:    password,
-		listen:      cfg.SOCKS5.Listen,
+		ovpnContent:   ovpnContent,
+		username:      cfg.OpenVPN.Username,
+		password:      password,
+		listen:        cfg.SOCKS5.Listen,
+		autoReconnect: autoReconnect,
+		cancel:        stop,
 	}
 
 	proxy.run(ctx)
+	os.Exit(proxy.exitCode)
 }
 
 type vpnProxy struct {
-	ovpnContent []byte
-	username    string
-	password    string
-	listen      string
+	ovpnContent   []byte
+	username      string
+	password      string
+	listen        string
+	autoReconnect bool
+	cancel        context.CancelFunc
 
-	mu      sync.RWMutex
-	client  *openvpn.Client
-	dns     string
-	firstUp chan struct{} // closed on first successful connection
+	mu       sync.RWMutex
+	client   *openvpn.Client
+	dns      string
+	firstUp  chan struct{} // closed on first successful connection
+	exitCode int
 }
 
 func (p *vpnProxy) run(ctx context.Context) {
@@ -139,6 +148,12 @@ func (p *vpnProxy) run(ctx context.Context) {
 	if err := server.Serve(ln); err != nil && ctx.Err() == nil {
 		log.Fatalf("serve failed: %v", err)
 	}
+
+	p.mu.RLock()
+	if p.client != nil {
+		p.client.Close()
+	}
+	p.mu.RUnlock()
 }
 
 func (p *vpnProxy) connectLoop(ctx context.Context) {
@@ -205,6 +220,12 @@ func (p *vpnProxy) connectLoop(ctx context.Context) {
 
 		select {
 		case <-reconnect:
+			if !p.autoReconnect {
+				log.Printf("openvpn connection lost, auto_reconnect is disabled, exiting")
+				p.exitCode = 1
+				p.cancel()
+				return
+			}
 			log.Printf("openvpn connection lost, reconnecting...")
 		case <-ctx.Done():
 			client.Close()
