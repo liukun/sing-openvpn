@@ -33,8 +33,9 @@ go.work.sum
 ehthumbs.db
 Thumbs.db
 
-# Built test binaries
+# Built binaries
 test
+/socks5
 
 # Project specific ignores
 *.ovpn
@@ -44,3 +45,4 @@ test
 *.p12
 *.pfx
 *.ta
+config.toml

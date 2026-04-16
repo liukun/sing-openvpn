@@ -1,0 +1,12 @@
+[socks5]
+listen = "127.0.0.1:6080"
+
+[openvpn]
+ovpn_file = "/path/to/client.ovpn"
+username = "myuser"
+
+# password: plain text password
+# password_script: path to a bash script that outputs the password
+# if both are set, password_script takes precedence
+password = "mypassword"
+# password_script = "/path/to/get-password.sh"
