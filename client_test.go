@@ -144,27 +144,26 @@ func TestErrorMonitor_StopsOnContextCancel(t *testing.T) {
 
 func TestPingLoop_TimeoutDetection(t *testing.T) {
 	c := newTestClient()
+	c.pingInterval = 1 // 1s tick for fast test
+	c.pingTimeout = 3  // 3s timeout
 	atomic.StoreInt32(&c.alive, 1)
 
-	// pingLoop calls updateActivity() on start, so we override lastActivity
-	// AFTER it starts but BEFORE the first 10s tick.
 	done := make(chan struct{})
 	go func() {
 		c.pingLoop()
 		close(done)
 	}()
 
-	// Wait a moment for pingLoop to call updateActivity(), then force stale
+	// Wait for pingLoop to init, then force lastActivity to be stale
 	time.Sleep(100 * time.Millisecond)
-	atomic.StoreInt64(&c.lastActivity, time.Now().Unix()-20) // 20s stale, exceeds 15s threshold
+	atomic.StoreInt64(&c.lastActivity, time.Now().Unix()-5) // 5s stale, exceeds 3s timeout
 
-	// First ticker fires at ~10s, at which point it will detect staleness
 	select {
 	case err := <-c.errChan:
 		if err == nil || err.Error() != "ping timeout" {
 			t.Fatalf("expected ping timeout error, got: %v", err)
 		}
-	case <-time.After(12 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("pingLoop did not detect timeout within expected time")
 	}
 
@@ -177,6 +176,8 @@ func TestPingLoop_TimeoutDetection(t *testing.T) {
 
 func TestPingLoop_StopsOnContextCancel(t *testing.T) {
 	c := newTestClient()
+	c.pingInterval = 10
+	c.pingTimeout = 60
 	c.updateActivity()
 
 	done := make(chan struct{})

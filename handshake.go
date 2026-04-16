@@ -474,8 +474,16 @@ func (c *Client) parsePushReply(reply string) error {
 				}
 			}
 			log.Infoln("[OpenVPN] Pushed route-delay: %s", strings.TrimPrefix(part, "route-delay "))
-		} else if strings.HasPrefix(part, "ping ") || strings.HasPrefix(part, "ping-restart ") {
-			log.Debugln("[OpenVPN] Pushed keepalive: %s", part)
+		} else if strings.HasPrefix(part, "ping ") {
+			log.Debugln("[OpenVPN] Pushed ping: %s (ignored, using ping-restart/2)", strings.TrimPrefix(part, "ping "))
+		} else if strings.HasPrefix(part, "ping-restart ") {
+			var val int
+			fmt.Sscanf(part, "ping-restart %d", &val)
+			if val > 0 {
+				c.pingTimeout = val
+				c.pingInterval = max(val/2, 1)
+			}
+			log.Infoln("[OpenVPN] Pushed ping-restart: %d, ping interval: %d", c.pingTimeout, c.pingInterval)
 		}
 	}
 	return nil

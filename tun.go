@@ -86,21 +86,10 @@ func (c *Client) processIncomingData(data []byte) {
 		return
 	}
 
-	log.Infoln("[OpenVPN] TUN write: %d bytes plaintext", len(plaintext))
+	log.Debugln("[OpenVPN] TUN write: %d bytes plaintext", len(plaintext))
 
 	if len(plaintext) == 16 && bytes.Equal(plaintext, pingMagic) {
-		log.Infoln("[OpenVPN] Received OpenVPN ping, sending ping reply")
-		if c.cipher != nil {
-			pongData, pongErr := c.cipher.Encrypt(pingMagic, c.dataAD)
-			if pongErr == nil {
-				p := &packet.Packet{
-					Opcode:  c.dataOpcode,
-					PeerID:  c.peerID,
-					Payload: pongData,
-				}
-				c.writePacket(p)
-			}
-		}
+		log.Debugln("[OpenVPN] Received OpenVPN ping")
 		return
 	}
 

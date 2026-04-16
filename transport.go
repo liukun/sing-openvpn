@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/airofm/sing-openvpn/internal/log"
@@ -147,15 +148,19 @@ func (c *Client) writePacket(p *packet.Packet) error {
 		}
 	}
 
+	var err error
 	if !c.isUDP() {
 		// TCP: prepend 2-byte length
 		tcpData := make([]byte, 2+len(data))
 		binary.BigEndian.PutUint16(tcpData[0:2], uint16(len(data)))
 		copy(tcpData[2:], data)
-		_, err := c.conn.Write(tcpData)
-		return err
+		_, err = c.conn.Write(tcpData)
+	} else {
+		_, err = c.conn.Write(data)
 	}
-	_, err := c.conn.Write(data)
+	if err == nil {
+		atomic.StoreInt64(&c.lastSend, time.Now().Unix())
+	}
 	return err
 }
 

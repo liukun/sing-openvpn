@@ -31,7 +31,8 @@ type Client struct {
 	mutex      sync.Mutex
 	ackWaiters sync.Map // uint32 -> chan struct{}
 
-	lastActivity int64 // unix timestamp in seconds
+	lastActivity int64 // unix timestamp in seconds, updated on data received
+	lastSend     int64 // unix timestamp in seconds, updated on any packet sent
 	alive        int32 // 1 = alive, 0 = dead (atomic)
 
 	tlsConn          *tls.Conn
@@ -47,7 +48,9 @@ type Client struct {
 	serverRandom1   []byte // 32 bytes
 	serverRandom2   []byte // 32 bytes
 
-	routeDelay int // seconds to wait after connection before routing is ready (from route-delay push)
+	routeDelay   int // seconds to wait after connection before routing is ready (from route-delay push)
+	pingInterval int // seconds between keepalive pings (from "ping N" push, default 10)
+	pingTimeout  int // seconds of inactivity before disconnect (from "ping-restart N" push, default 60)
 
 	tunDevice  wireguard.Device
 	cipher     crypto.DataCipher
@@ -79,6 +82,8 @@ func NewClient(ovpnContent []byte, username, password string, dialer Dialer) (*C
 	c := &Client{
 		cfg:              cfg,
 		localSID:         sid,
+		pingInterval:     10,
+		pingTimeout:      60,
 		handshakeStarted: make(chan struct{}, 1),
 		errChan:          make(chan error, 10),
 		ctx:              ctx,
@@ -378,22 +383,26 @@ func (c *Client) errorMonitor() {
 var pingMagic = []byte{0x2a, 0x18, 0x7b, 0xf3, 0x64, 0x1e, 0xb4, 0xcb, 0x07, 0xed, 0x2d, 0x0a, 0x98, 0x1f, 0xc7, 0x48}
 
 func (c *Client) pingLoop() {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(time.Duration(c.pingInterval) * time.Second)
 	defer ticker.Stop()
+	now := time.Now().Unix()
 	c.updateActivity()
+	atomic.StoreInt64(&c.lastSend, now)
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
 		case <-ticker.C:
+			now = time.Now().Unix()
 			last := atomic.LoadInt64(&c.lastActivity)
-			if time.Now().Unix()-last > 15 {
-				log.Warnln("[OpenVPN] Ping timeout: no data received for 15 seconds, closing connection")
+			if now-last > int64(c.pingTimeout) {
+				log.Warnln("[OpenVPN] Ping timeout: no data received for %d seconds, closing connection", c.pingTimeout)
 				c.errChan <- fmt.Errorf("ping timeout")
 				return
 			}
 
-			if c.cipher != nil {
+			lastSend := atomic.LoadInt64(&c.lastSend)
+			if c.cipher != nil && now-lastSend >= int64(c.pingInterval) {
 				pingData, err := c.cipher.Encrypt(pingMagic, c.dataAD)
 				if err == nil {
 					p := &packet.Packet{
