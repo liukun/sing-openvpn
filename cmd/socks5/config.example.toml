@@ -2,6 +2,8 @@
 listen = "127.0.0.1:6080"
 # log_level: error, warn, info, debug, trace (default: debug)
 # log_level = "info"
+# auto_reconnect: auto reconnect on VPN disconnect (default: true)
+# auto_reconnect = false
 
 [openvpn]
 ovpn_file = "/path/to/client.ovpn"

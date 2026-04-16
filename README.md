@@ -10,7 +10,7 @@
 - **协议支持**：支持 OpenVPN UDP 和 TCP 协议连接，支持 `.ovpn` 配置文件解析。
 - **TLS 控制通道**：
   - 完整的 TLS 握手及密钥交换 (`key_method_2`)。
-  - 支持 `tls-crypt` (V1) 预共享密钥认证与控制通道加密。
+  - 支持 `tls-auth`（HMAC 认证）和 `tls-crypt` (V1)（加密+认证）两种控制通道保护模式。
   - 支持动态配置协商 (`PUSH_REQUEST` / `PUSH_REPLY`)。
   - **高可靠控制流**：针对 UDP 丢包实现了带 ACK 确认机制的超时重传队列，确保恶劣网络下握手成功率。
 - **数据通道加密**：
@@ -89,6 +89,63 @@ func main() {
 	// 现在你可以使用 conn 进行数据传输了...
 }
 ```
+
+## 🔌 SOCKS5 代理服务
+
+项目内置了一个开箱即用的 SOCKS5 代理服务，可将本地 SOCKS5 流量透明转发至 OpenVPN 隧道，支持自动重连。
+
+### 编译
+
+需要 `with_gvisor` build tag 以启用 gVisor 用户态网络栈：
+
+```bash
+go build -tags with_gvisor -o socks5 ./cmd/socks5/
+```
+
+### 配置文件
+
+创建 TOML 配置文件（参考 `cmd/socks5/config.example.toml`）：
+
+```toml
+[socks5]
+listen = "127.0.0.1:6080"
+# log_level: error, warn, info, debug, trace (default: debug)
+# log_level = "info"
+# auto_reconnect: auto reconnect on VPN disconnect (default: true)
+# auto_reconnect = false
+
+[openvpn]
+ovpn_file = "/path/to/client.ovpn"
+username = "myuser"
+
+# 二选一：明文密码 或 脚本动态获取
+password = "mypassword"
+# password_script = "/path/to/get-password.sh"
+```
+
+| 字段 | 说明 |
+|------|------|
+| `socks5.listen` | SOCKS5 监听地址，默认 `127.0.0.1:6080` |
+| `socks5.log_level` | 日志级别：`error` / `warn` / `info` / `debug` / `trace`，默认 `debug` |
+| `socks5.auto_reconnect` | VPN 断线后是否自动重连，默认 `true` |
+| `openvpn.ovpn_file` | `.ovpn` 配置文件路径 |
+| `openvpn.username` | 用户名 |
+| `openvpn.password` | 明文密码 |
+| `openvpn.password_script` | 密码脚本路径（优先级高于 `password`），脚本输出的第一行作为密码 |
+
+### 运行
+
+```bash
+./socks5 config.toml
+```
+
+启动后即可将浏览器或其他应用的代理设置指向 `socks5://127.0.0.1:6080`。
+
+默认启用自动重连：VPN 断线后会以指数退避策略重试。设置 `auto_reconnect = false` 可关闭此行为，断线后进程将直接退出。
+
+### 已知行为
+
+- 日志中可能出现 `[ERR] socks: Failed to get version byte: EOF`，这是 go-socks5 库在客户端未发送数据就断开时打印的（如浏览器预连接、健康检查等），属于正常现象，可忽略。
 
 ## 🏗 架构说明
 
