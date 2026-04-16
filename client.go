@@ -49,8 +49,10 @@ type Client struct {
 
 	routeDelay int // seconds to wait after connection before routing is ready (from route-delay push)
 
-	tunDevice wireguard.Device
-	cipher    crypto.DataCipher
+	tunDevice  wireguard.Device
+	cipher     crypto.DataCipher
+	dataOpcode byte   // cached after handshake: OpDataV1 or OpDataV2
+	dataAD     []byte // cached AEAD AD prefix: [opcode_byte][peer-id(3)] for V2, nil for V1
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -321,6 +323,23 @@ func (c *Client) isUDP() bool {
 	return c.isUDPConn
 }
 
+// initDataHeader caches the data channel opcode and AEAD AD prefix.
+// Must be called after peerID is assigned (post-handshake).
+func (c *Client) initDataHeader() {
+	if c.peerID != 0 {
+		c.dataOpcode = packet.OpDataV2
+		c.dataAD = []byte{
+			packet.OpDataV2 << 3,
+			byte(c.peerID >> 16),
+			byte(c.peerID >> 8),
+			byte(c.peerID),
+		}
+	} else {
+		c.dataOpcode = packet.OpDataV1
+		c.dataAD = nil
+	}
+}
+
 func (c *Client) getNextPacketID() uint32 {
 	return atomic.AddUint32(&c.packetID, 1) - 1
 }
@@ -356,17 +375,17 @@ func (c *Client) errorMonitor() {
 	}
 }
 
+var pingMagic = []byte{0x2a, 0x18, 0x7b, 0xf3, 0x64, 0x1e, 0xb4, 0xcb, 0x07, 0xed, 0x2d, 0x0a, 0x98, 0x1f, 0xc7, 0x48}
+
 func (c *Client) pingLoop() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
-	pingMagic := []byte{0x2a, 0x18, 0x7b, 0xf3, 0x64, 0x1e, 0xb4, 0xcb, 0x07, 0xed, 0x2d, 0x0a, 0x98, 0x1f, 0xc7, 0x48}
-	c.updateActivity() // Initialize activity
+	c.updateActivity()
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
 		case <-ticker.C:
-			// Check for timeout: 15 seconds without any activity
 			last := atomic.LoadInt64(&c.lastActivity)
 			if time.Now().Unix()-last > 15 {
 				log.Warnln("[OpenVPN] Ping timeout: no data received for 15 seconds, closing connection")
@@ -375,14 +394,10 @@ func (c *Client) pingLoop() {
 			}
 
 			if c.cipher != nil {
-				pingData, err := c.cipher.Encrypt(pingMagic)
+				pingData, err := c.cipher.Encrypt(pingMagic, c.dataAD)
 				if err == nil {
-					opcode := packet.OpDataV1
-					if c.peerID != 0 {
-						opcode = packet.OpDataV2
-					}
 					p := &packet.Packet{
-						Opcode:  byte(opcode),
+						Opcode:  c.dataOpcode,
 						PeerID:  c.peerID,
 						Payload: pingData,
 					}

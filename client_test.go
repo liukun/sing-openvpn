@@ -280,3 +280,45 @@ func TestUpdateActivity(t *testing.T) {
 		t.Fatalf("lastActivity %d not in range [%d, %d]", activity, before, after)
 	}
 }
+
+// --- processIncomingData tests ---
+// These use cipher=nil (plaintext passthrough) to test the data path logic.
+
+func TestProcessIncomingData_NonIPDropped(t *testing.T) {
+	c := newTestClient()
+	defer c.cancel()
+
+	// Payload from the real crash: starts with 0x00 (IP version 0), not valid IP
+	payload := []byte{
+		0x00, 0x00, 0x00, 0x01, 0x5b, 0x68, 0x90, 0xe6,
+		0x43, 0x0e, 0x0d, 0xf0, 0xf1, 0x39, 0xdb, 0x1c,
+		0xa7, 0xed, 0x08, 0x82, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+	}
+
+	// Must not panic (was a nil pointer crash before fix)
+	c.processIncomingData(payload)
+}
+
+func TestProcessIncomingData_TUNNilSafe(t *testing.T) {
+	c := newTestClient()
+	defer c.cancel()
+	// tunDevice is nil — valid IPv4 packet should be dropped gracefully, not panic
+
+	// Minimal IPv4 packet (20 bytes header, src=10.0.0.1, dst=10.0.0.2)
+	ipv4 := make([]byte, 40)
+	ipv4[0] = 0x45 // IPv4, IHL=5
+	ipv4[12], ipv4[13], ipv4[14], ipv4[15] = 10, 0, 0, 1
+	ipv4[16], ipv4[17], ipv4[18], ipv4[19] = 10, 0, 0, 2
+
+	c.processIncomingData(ipv4)
+}
+
+func TestProcessIncomingData_EmptyPayload(t *testing.T) {
+	c := newTestClient()
+	defer c.cancel()
+
+	// Empty plaintext should not panic
+	c.processIncomingData([]byte{})
+}

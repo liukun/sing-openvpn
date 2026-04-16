@@ -159,19 +159,7 @@ func (c *Client) negotiateConfig(ctx context.Context) error {
 					return fmt.Errorf("key_method_2 response failed: %w", err)
 				}
 				keyMethod2Done = true
-				log.Infoln("[OpenVPN] Key exchange completed, sending peer-info and PUSH_REQUEST")
-
-				// Send peer-info as a separate TLS message before PUSH_REQUEST.
-				// This is required by OpenVPN AS to enable peer-id (DATA_V2) and NCP negotiation.
-				// IV_PROTO=8094 (0x1F9E) matches OpenVPN Connect 3.x.
-				// IV_CIPHERS is critical: it triggers NCP negotiation on the server side,
-				// causing it to select AES-256-GCM and push peer-id in PUSH_REPLY.
-				peerInfo := "IV_VER=3.11.3\nIV_PLAT=linux\nIV_NCP=2\nIV_TCPNL=1\nIV_PROTO=8094\nIV_MTU=1600\nIV_CIPHERS=AES-128-CBC:AES-192-CBC:AES-256-CBC:AES-128-GCM:AES-192-GCM:AES-256-GCM:CHACHA20-POLY1305\nIV_SSL=OpenSSL 3.0.0 7 Sep 2021\nIV_IPv6=0\n\x00"
-				if _, err := c.tlsConn.Write([]byte(peerInfo)); err != nil {
-					log.Warnln("[OpenVPN] Failed to send peer-info: %v", err)
-				} else {
-					log.Infoln("[OpenVPN] Sent peer-info")
-				}
+				log.Infoln("[OpenVPN] Key exchange completed, sending PUSH_REQUEST")
 
 				// Send PUSH_REQUEST
 				if _, err := c.tlsConn.Write([]byte("PUSH_REQUEST\x00")); err != nil {
@@ -237,77 +225,56 @@ func (c *Client) negotiateConfig(ctx context.Context) error {
 	}
 
 	// 6. Derive data channel keys using OpenVPN PRF (key_method 2)
-	// Try TLS-EKM first (TLS 1.3 or TLS 1.2 with EMS), fall back to traditional PRF
-	var keyMaterial []byte
-
-	cs := c.tlsConn.ConnectionState()
 	keyLen := 256 // key2 = 2 * struct key (each: cipher[64] + hmac[64])
 
-	ekmMaterial, ekmErr := cs.ExportKeyingMaterial("EXPORTER-OpenVPN-datachannel", nil, keyLen)
-	if ekmErr == nil {
-		keyMaterial = ekmMaterial
-		log.Infoln("[OpenVPN] Using TLS-EKM for key derivation")
-	} else {
-		// Traditional OpenVPN PRF key derivation
-		log.Infoln("[OpenVPN] Using traditional PRF for key derivation (EKM unavailable: %v)", ekmErr)
+	log.Infoln("[OpenVPN] Using traditional PRF for key derivation")
+	log.Debugln("[OpenVPN] PRF inputs: pre_master=%s", hex.EncodeToString(c.clientPreMaster[:8]))
+	log.Debugln("[OpenVPN] PRF inputs: client_r1=%s, server_r1=%s", hex.EncodeToString(c.clientRandom1[:8]), hex.EncodeToString(c.serverRandom1[:8]))
+	log.Debugln("[OpenVPN] PRF inputs: client_r2=%s, server_r2=%s", hex.EncodeToString(c.clientRandom2[:8]), hex.EncodeToString(c.serverRandom2[:8]))
+	log.Debugln("[OpenVPN] PRF inputs: localSID=%x, remoteSID=%x", c.localSID, c.remoteSID)
 
-		log.Debugln("[OpenVPN] PRF inputs: pre_master=%s", hex.EncodeToString(c.clientPreMaster[:8]))
-		log.Debugln("[OpenVPN] PRF inputs: client_r1=%s, server_r1=%s", hex.EncodeToString(c.clientRandom1[:8]), hex.EncodeToString(c.serverRandom1[:8]))
-		log.Debugln("[OpenVPN] PRF inputs: client_r2=%s, server_r2=%s", hex.EncodeToString(c.clientRandom2[:8]), hex.EncodeToString(c.serverRandom2[:8]))
-		log.Debugln("[OpenVPN] PRF inputs: localSID=%x, remoteSID=%x", c.localSID, c.remoteSID)
+	master := crypto.OpenVPNPRF(c.clientPreMaster,
+		"OpenVPN master secret",
+		c.clientRandom1, c.serverRandom1,
+		nil, nil, 48)
+	log.Debugln("[OpenVPN] PRF master=%s", hex.EncodeToString(master[:16]))
 
-		// Step 1: master = PRF(pre_master_secret, "OpenVPN master secret", client_random1, server_random1)
-		master := crypto.OpenVPNPRF(c.clientPreMaster,
-			"OpenVPN master secret",
-			c.clientRandom1, c.serverRandom1,
-			nil, nil, 48)
+	keyMaterial := crypto.OpenVPNPRF(master,
+		"OpenVPN key expansion",
+		c.clientRandom2, c.serverRandom2,
+		&c.localSID, &c.remoteSID, keyLen)
+	log.Debugln("[OpenVPN] PRF key_block[0:32]=%s", hex.EncodeToString(keyMaterial[:32]))
+	log.Debugln("[OpenVPN] PRF key_block[64:96]=%s", hex.EncodeToString(keyMaterial[64:96]))
+	log.Debugln("[OpenVPN] PRF key_block[128:160]=%s", hex.EncodeToString(keyMaterial[128:160]))
+	log.Debugln("[OpenVPN] PRF key_block[192:224]=%s", hex.EncodeToString(keyMaterial[192:224]))
 
-		log.Debugln("[OpenVPN] PRF master=%s", hex.EncodeToString(master[:16]))
-
-		// Step 2: key_block = PRF(master, "OpenVPN key expansion", client_random2, server_random2, client_sid, server_sid)
-		keyMaterial = crypto.OpenVPNPRF(master,
-			"OpenVPN key expansion",
-			c.clientRandom2, c.serverRandom2,
-			&c.localSID, &c.remoteSID, keyLen)
-
-		log.Debugln("[OpenVPN] PRF key_block[0:32]=%s", hex.EncodeToString(keyMaterial[:32]))
-		log.Debugln("[OpenVPN] PRF key_block[64:96]=%s", hex.EncodeToString(keyMaterial[64:96]))
-		log.Debugln("[OpenVPN] PRF key_block[128:160]=%s", hex.EncodeToString(keyMaterial[128:160]))
-		log.Debugln("[OpenVPN] PRF key_block[192:224]=%s", hex.EncodeToString(keyMaterial[192:224]))
-	}
-
-	// For key_method 2 with PRF, key_block layout is:
-	// key[0] = { cipher[64], hmac[64] } (offset 0-127)
-	// key[1] = { cipher[64], hmac[64] } (offset 128-255)
-	// TLS client uses KEY_DIRECTION_NORMAL: encrypt=key[0], decrypt=key[1]
-	// TLS server uses KEY_DIRECTION_INVERSE: encrypt=key[1], decrypt=key[0]
+	// key_block layout: key[0]{cipher[64],hmac[64]} + key[1]{cipher[64],hmac[64]}
+	// TLS client (NORMAL): encrypt=key[0], decrypt=key[1]
 	log.Infoln("[OpenVPN] Using cipher: %s for data channel", c.cfg.Cipher)
+	var err error
 	if strings.Contains(c.cfg.Cipher, "GCM") {
-		// GCM: use first 32 bytes of cipher key, first 4 bytes of hmac as salt
-		// TLS client KEY_DIRECTION_NORMAL: encrypt=key[0], decrypt=key[1]
-		encKey := keyMaterial[0:32]             // key[0].cipher[0:32]
-		decKey := keyMaterial[128 : 128+32]     // key[1].cipher[0:32]
-		encIV := keyMaterial[64 : 64+4]         // key[0].hmac[0:4]
-		decIV := keyMaterial[128+64 : 128+64+4] // key[1].hmac[0:4]
-		c.cipher, _ = crypto.NewGCMCipher(encKey, decKey, encIV, decIV)
+		encKey := keyMaterial[0:32]
+		decKey := keyMaterial[128 : 128+32]
+		encIV := keyMaterial[64 : 64+8]         // implicit IV, 8 bytes
+		decIV := keyMaterial[128+64 : 128+64+8] // implicit IV, 8 bytes
+		c.cipher, err = crypto.NewGCMCipher(encKey, decKey, encIV, decIV)
+		if err != nil {
+			return fmt.Errorf("failed to create GCM cipher: %w", err)
+		}
 		log.Infoln("[OpenVPN] Negotiated AES-GCM data channel keys")
 	} else {
-		// CBC: key_block layout = key[0]{cipher[64],hmac[64]} + key[1]{cipher[64],hmac[64]}
-		// HMAC key = md_kt_size (20 for SHA1)
-		//
-		// Standard OpenVPN KEY_DIRECTION:
-		//
-		//	Client (NORMAL):  encrypt=key[0], decrypt=key[1]
-		//	Server (INVERSE): encrypt=key[1], decrypt=key[0]
-		//
-		// Testing: standard NORMAL direction
-		encCipherKey := keyMaterial[0:32]         // key[0].cipher[0:32]
-		decCipherKey := keyMaterial[128 : 128+32] // key[1].cipher[0:32]
-		encHMACKey := keyMaterial[64 : 64+20]     // key[0].hmac[0:20]
-		decHMACKey := keyMaterial[192 : 192+20]   // key[1].hmac[0:20]
-		c.cipher, _ = crypto.NewCBCCipher(encCipherKey, decCipherKey, encHMACKey, decHMACKey)
-		log.Infoln("[OpenVPN] Negotiated AES-CBC data channel keys (NORMAL: enc=key[0], dec=key[1])")
+		encCipherKey := keyMaterial[0:32]
+		decCipherKey := keyMaterial[128 : 128+32]
+		encHMACKey := keyMaterial[64 : 64+20]
+		decHMACKey := keyMaterial[192 : 192+20]
+		c.cipher, err = crypto.NewCBCCipher(encCipherKey, decCipherKey, encHMACKey, decHMACKey)
+		if err != nil {
+			return fmt.Errorf("failed to create CBC cipher: %w", err)
+		}
+		log.Infoln("[OpenVPN] Negotiated AES-CBC data channel keys")
 	}
+
+	c.initDataHeader()
 
 	return nil
 }
@@ -344,7 +311,15 @@ func (c *Client) sendKeyMethod2() error {
 	if !c.isUDP() {
 		proto = "TCPv4_CLIENT"
 	}
-	options := fmt.Sprintf("V4,dev-type tun,link-mtu 1557,tun-mtu 1500,proto %s,cipher %s,auth SHA1,keysize 256,key-method 2,tls-client", proto, c.cfg.Cipher)
+	cipher := c.cfg.Cipher
+	if cipher == "" {
+		cipher = "AES-256-GCM"
+	}
+	auth := c.cfg.Auth
+	if auth == "" {
+		auth = "SHA1"
+	}
+	options := fmt.Sprintf("V4,dev-type tun,link-mtu 1557,tun-mtu 1500,proto %s,cipher %s,auth %s,keysize 256,key-method 2,tls-client", proto, cipher, auth)
 	writeString(&buf, options)
 
 	// Username/password (if auth-user-pass)
@@ -352,6 +327,11 @@ func (c *Client) sendKeyMethod2() error {
 		writeString(&buf, c.cfg.Username)
 		writeString(&buf, c.cfg.Password)
 	}
+
+	// Peer-info: must be part of key_method_2 message for NCP cipher negotiation.
+	// IV_CIPHERS triggers the server to negotiate data channel cipher via NCP.
+	peerInfo := "IV_VER=3.11.3\nIV_PLAT=linux\nIV_NCP=2\nIV_TCPNL=1\nIV_PROTO=6\nIV_MTU=1600\nIV_CIPHERS=AES-128-CBC:AES-192-CBC:AES-256-CBC:AES-128-GCM:AES-192-GCM:AES-256-GCM:CHACHA20-POLY1305\nIV_SSL=OpenSSL 3.0.0 7 Sep 2021\nIV_IPv6=0\n"
+	writeString(&buf, peerInfo)
 
 	_, err := c.tlsConn.Write(buf.Bytes())
 	if err != nil {

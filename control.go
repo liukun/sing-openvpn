@@ -76,9 +76,13 @@ func (c *ControlConn) Write(b []byte) (n int, err error) {
 
 	// Fragment large TLS messages to avoid IP fragmentation.
 	// Each control packet has overhead: opcode(1)+session_id(8)+ack(1)+packet_id(4)=14 bytes
-	// tls-crypt adds: pid(4)+time(4)+auth_tag(32)=40 bytes
-	// To stay under ~1400 bytes UDP payload (safe for most paths):
-	maxPayload := 1200
+	// plus controlProtector overhead (tls-crypt: 40B, tls-auth: 28B+).
+	// Stay under ~1400 bytes UDP payload (safe for most paths).
+	protectorOverhead := 0
+	if c.client.controlProtector != nil {
+		protectorOverhead = c.client.controlProtector.Overhead()
+	}
+	maxPayload := 1400 - 14 - protectorOverhead
 
 	for offset := 0; offset < len(b); offset += maxPayload {
 		end := offset + maxPayload

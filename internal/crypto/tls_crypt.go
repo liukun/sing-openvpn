@@ -6,10 +6,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"hash"
-	"strings"
 	"sync"
 	"time"
 )
@@ -26,30 +24,9 @@ type TLSCrypt struct {
 }
 
 func NewTLSCrypt(keyData string) (*TLSCrypt, error) {
-	lines := strings.Split(keyData, "\n")
-	var hexData string
-	inKey := false
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.Contains(line, "-----BEGIN OpenVPN Static key V1-----") {
-			inKey = true
-			continue
-		}
-		if strings.Contains(line, "-----END OpenVPN Static key V1-----") {
-			break
-		}
-		if inKey {
-			hexData += line
-		}
-	}
-
-	data, err := hex.DecodeString(hexData)
+	data, err := ParseStaticKey(keyData)
 	if err != nil {
 		return nil, err
-	}
-
-	if len(data) < 256 {
-		return nil, errors.New("tls-crypt key too short, need 256 bytes")
 	}
 
 	encBlock, err := aes.NewCipher(data[128:160])
@@ -83,18 +60,18 @@ func (tc *TLSCrypt) Wrap(data []byte) ([]byte, error) {
 	plaintextPayload := data[9:]
 
 	tc.mutex.Lock()
-	seq := tc.sequence
 	tc.sequence++
+	seq := tc.sequence
 	tc.mutex.Unlock()
 
-	pidBuf := make([]byte, 8)
+	var pidBuf [8]byte
 	binary.BigEndian.PutUint32(pidBuf[0:4], seq)
 	binary.BigEndian.PutUint32(pidBuf[4:8], uint32(time.Now().Unix()))
 
 	h := tc.macPoolEnc.Get().(hash.Hash)
 	h.Reset()
 	h.Write(clearHeader)
-	h.Write(pidBuf)
+	h.Write(pidBuf[:])
 	h.Write(plaintextPayload)
 	authTag := h.Sum(nil)
 	tc.macPoolEnc.Put(h)
@@ -107,7 +84,7 @@ func (tc *TLSCrypt) Wrap(data []byte) ([]byte, error) {
 
 	result := make([]byte, 0, 9+8+32+len(ciphertext))
 	result = append(result, clearHeader...)
-	result = append(result, pidBuf...)
+	result = append(result, pidBuf[:]...)
 	result = append(result, authTag...)
 	result = append(result, ciphertext...)
 
@@ -148,4 +125,9 @@ func (tc *TLSCrypt) Unwrap(data []byte) ([]byte, error) {
 	copy(result[9:], plaintext)
 
 	return result, nil
+}
+
+// Overhead returns the number of extra bytes added by tls-crypt wrapping.
+func (tc *TLSCrypt) Overhead() int {
+	return 8 + 32 // pid(4) + timestamp(4) + auth_tag(32) = 40
 }

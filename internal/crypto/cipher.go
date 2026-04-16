@@ -17,8 +17,10 @@ import (
 )
 
 type DataCipher interface {
-	Encrypt(plaintext []byte) ([]byte, error)
-	Decrypt(ciphertext []byte) ([]byte, error)
+	// ad is the AEAD additional data prefix (opcode+peer-id header for DATA_V2).
+	// GCM appends the packet_id to form the full AAD. CBC ignores it.
+	Encrypt(plaintext []byte, ad []byte) ([]byte, error)
+	Decrypt(ciphertext []byte, ad []byte) ([]byte, error)
 }
 
 type CBCCipher struct {
@@ -53,7 +55,7 @@ func NewCBCCipher(encKey, decKey, encHMACKey, decHMACKey []byte) (*CBCCipher, er
 	}, nil
 }
 
-func (c *CBCCipher) Encrypt(plaintext []byte) ([]byte, error) {
+func (c *CBCCipher) Encrypt(plaintext []byte, _ []byte) ([]byte, error) {
 	c.mutex.Lock()
 	pid := c.txPacketID
 	c.txPacketID++
@@ -98,7 +100,7 @@ func (c *CBCCipher) Encrypt(plaintext []byte) ([]byte, error) {
 	return result, nil
 }
 
-func (c *CBCCipher) Decrypt(data []byte) ([]byte, error) {
+func (c *CBCCipher) Decrypt(data []byte, _ []byte) ([]byte, error) {
 	if len(data) < 20+16 {
 		return nil, errors.New("CBC data too short")
 	}
@@ -138,7 +140,7 @@ func (c *CBCCipher) Decrypt(data []byte) ([]byte, error) {
 	if len(plaintext) < 4 {
 		return nil, errors.New("decrypted data too short for packet_id")
 	}
-	
+
 	packetID := binary.BigEndian.Uint32(plaintext[0:4])
 	if !c.replayWindow.Check(packetID) {
 		return nil, errors.New("replayed or stale packet")
@@ -186,51 +188,70 @@ func NewGCMCipher(encKey, decKey, encIV, decIV []byte) (*GCMCipher, error) {
 	}, nil
 }
 
-func (c *GCMCipher) Encrypt(plaintext []byte) ([]byte, error) {
+func (c *GCMCipher) Encrypt(plaintext []byte, ad []byte) ([]byte, error) {
 	c.mutex.Lock()
-	pid := c.packetID
 	c.packetID++
+	pid := c.packetID
 	c.mutex.Unlock()
 
-	nonce := make([]byte, 12)
-	copy(nonce[0:4], c.encryptIV[0:4])
-	binary.BigEndian.PutUint32(nonce[4:8], pid)
+	// OpenVPN AEAD nonce: [packet_id(4)] [implicit_iv(8)]
+	var nonce [12]byte
+	binary.BigEndian.PutUint32(nonce[0:4], pid)
+	copy(nonce[4:12], c.encryptIV)
 
-	// Pre-allocate the exact size: 4 (pid) + len(plaintext) + 16 (tag)
-	result := make([]byte, 4, 4+len(plaintext)+16)
+	// AAD = [ad_prefix (opcode+peerid for V2)] [packet_id(4)]
+	var fullAD [8]byte
+	n := copy(fullAD[:], ad)
+	binary.BigEndian.PutUint32(fullAD[n:n+4], pid)
+
+	// Wire format: [packet_id(4)] [tag(16)] [ciphertext]
+	// Seal into result after pid+tag gap, then rearrange tag to front.
+	tagSize := c.encAEAD.Overhead()
+	result := make([]byte, 4+tagSize+len(plaintext))
 	binary.BigEndian.PutUint32(result[0:4], pid)
-
-	// Seal appends the ciphertext to result, minimizing allocations
-	result = c.encAEAD.Seal(result, nonce, plaintext, result[0:4])
+	sealed := c.encAEAD.Seal(result[4:4], nonce[:], plaintext, fullAD[:n+4])
+	// sealed layout in result[4:]: [ciphertext][tag] → rearrange to [tag][ciphertext]
+	ctLen := len(sealed) - tagSize
+	var tagBuf [16]byte
+	copy(tagBuf[:], sealed[ctLen:])
+	copy(result[4+tagSize:], sealed[:ctLen])
+	copy(result[4:4+tagSize], tagBuf[:])
 
 	return result, nil
 }
 
-func (c *GCMCipher) Decrypt(data []byte) ([]byte, error) {
-	if len(data) < 4+16 {
+func (c *GCMCipher) Decrypt(data []byte, ad []byte) ([]byte, error) {
+	tagSize := c.decAEAD.Overhead()
+	if len(data) < 4+tagSize {
 		return nil, errors.New("data too short for GCM")
 	}
 
 	packetID := binary.BigEndian.Uint32(data[0:4])
-	
-	// Fast path: check replay window before expensive decryption
+
 	if !c.replayWindow.Check(packetID) {
 		return nil, errors.New("replayed or stale packet")
 	}
 
-	ciphertext := data[4:]
+	// Wire: [packet_id(4)] [tag(16)] [ciphertext]
+	// Go AEAD.Open expects: [ciphertext] [tag]
+	ctLen := len(data) - 4 - tagSize
+	sealed := make([]byte, ctLen+tagSize)
+	copy(sealed, data[4+tagSize:])
+	copy(sealed[ctLen:], data[4:4+tagSize])
 
-	nonce := make([]byte, 12)
-	copy(nonce[0:4], c.decryptIV[0:4])
-	binary.BigEndian.PutUint32(nonce[4:8], packetID)
+	var nonce [12]byte
+	binary.BigEndian.PutUint32(nonce[0:4], packetID)
+	copy(nonce[4:12], c.decryptIV)
 
-	plaintext, err := c.decAEAD.Open(nil, nonce, ciphertext, data[0:4])
+	var fullAD [8]byte
+	n := copy(fullAD[:], ad)
+	copy(fullAD[n:n+4], data[0:4])
+
+	plaintext, err := c.decAEAD.Open(sealed[:0], nonce[:], sealed, fullAD[:n+4])
 	if err != nil {
 		return nil, err
 	}
 
-	// Update window only after successful authentication
 	c.replayWindow.Update(packetID)
-
 	return plaintext, nil
 }

@@ -33,6 +33,9 @@ go.work.sum
 ehthumbs.db
 Thumbs.db
 
+# Built test binaries
+test
+
 # Project specific ignores
 *.ovpn
 *.crt
