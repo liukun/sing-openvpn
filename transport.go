@@ -94,11 +94,10 @@ func (c *Client) readLoop() {
 
 		log.Infoln("[OpenVPN] Received raw packet: len=%d, first_byte=%02x opcode=%d", len(data), data[0], data[0]>>3)
 
-		// Control channel protection (tls-crypt)
-		if c.tlsCrypt != nil {
-			// Data packets (packet.OpDataV1/V2) are NOT wrapped by tls-crypt.
-			// They start with a specific opcode.
-			// Control packets ARE wrapped and start with 32-byte HMAC.
+		// Control channel protection (tls-auth / tls-crypt)
+		if c.controlProtector != nil {
+			// Data packets (packet.OpDataV1/V2) are NOT wrapped.
+			// Only control packets are wrapped.
 			isData := false
 			if len(data) > 0 {
 				opcode := data[0] >> 3
@@ -107,12 +106,12 @@ func (c *Client) readLoop() {
 				}
 			}
 
-			if !isData && len(data) >= 9+8+32 {
-				unwrapped, err := c.tlsCrypt.Unwrap(data)
+			if !isData {
+				unwrapped, err := c.controlProtector.Unwrap(data)
 				if err == nil {
 					data = unwrapped
 				} else {
-					log.Debugln("[OpenVPN] Failed to unwrap tls-crypt: %v", err)
+					log.Debugln("[OpenVPN] Failed to unwrap control packet: %v", err)
 				}
 			}
 		}
@@ -139,10 +138,10 @@ func (c *Client) writePacket(p *packet.Packet) error {
 		log.Debugln("[OpenVPN] DATA packet hex: %s", hex.EncodeToString(data[:dumpLen]))
 	}
 
-	// Control channel protection (tls-crypt)
-	if p.Opcode != packet.OpDataV1 && p.Opcode != packet.OpDataV2 && c.tlsCrypt != nil {
+	// Control channel protection (tls-auth / tls-crypt)
+	if p.Opcode != packet.OpDataV1 && p.Opcode != packet.OpDataV2 && c.controlProtector != nil {
 		var err error
-		data, err = c.tlsCrypt.Wrap(data)
+		data, err = c.controlProtector.Wrap(data)
 		if err != nil {
 			return err
 		}
@@ -150,11 +149,8 @@ func (c *Client) writePacket(p *packet.Packet) error {
 
 	if !c.isUDP() {
 		// TCP: prepend 2-byte length
-		lenBuf := make([]byte, 2)
-		binary.BigEndian.PutUint16(lenBuf, uint16(len(data)))
-		// Pre-allocate single buffer for length + data to avoid two writes or append reallocation
 		tcpData := make([]byte, 2+len(data))
-		copy(tcpData[0:2], lenBuf)
+		binary.BigEndian.PutUint16(tcpData[0:2], uint16(len(data)))
 		copy(tcpData[2:], data)
 		_, err := c.conn.Write(tcpData)
 		return err

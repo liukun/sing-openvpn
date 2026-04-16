@@ -24,7 +24,7 @@ func parseOVPN(data []byte, baseDir string) (*Config, error) {
 
 	var globalProto string
 
-		readFile := func(filename string) (string, error) {
+	readFile := func(filename string) (string, error) {
 		if baseDir != "" && !filepath.IsAbs(filename) {
 			filename = filepath.Join(baseDir, filename)
 		}
@@ -54,6 +54,8 @@ func parseOVPN(data []byte, baseDir string) (*Config, error) {
 					cfg.TLSKey = content
 				case "tls-crypt":
 					cfg.TLSCrypt = content
+				case "tls-auth":
+					cfg.TLSAuth = content
 				}
 				currentBlock = ""
 				blockContent.Reset()
@@ -140,6 +142,30 @@ func parseOVPN(data []byte, baseDir string) (*Config, error) {
 					return nil, err
 				}
 				cfg.TLSCrypt = content
+			}
+		case "tls-auth":
+			if len(fields) >= 2 {
+				content, err := readFile(fields[1])
+				if err != nil {
+					return nil, err
+				}
+				cfg.TLSAuth = content
+				// tls-auth <file> <direction> — inline key-direction on same line
+				if len(fields) >= 3 && cfg.KeyDirection == nil {
+					if d, err := strconv.Atoi(fields[2]); err == nil {
+						cfg.KeyDirection = &d
+					}
+				}
+			}
+		case "auth":
+			if len(fields) >= 2 {
+				cfg.Auth = strings.ToUpper(fields[1])
+			}
+		case "key-direction":
+			if len(fields) >= 2 {
+				if d, err := strconv.Atoi(fields[1]); err == nil {
+					cfg.KeyDirection = &d
+				}
 			}
 		case "auth-nocache":
 			cfg.AuthNoCache = true

@@ -14,20 +14,23 @@ type Remote struct {
 }
 
 type Config struct {
-	Remotes     []Remote
-	TLSCert     string
-	TLSKey      string
-	CACert      string
-	TLSCrypt    string
-	Cipher      string
-	AuthNoCache bool
-	Username    string
-	Password    string
-	IP          netip.Addr
-	Mask        netip.Prefix
-	MTU         int
-	DNS         []string
-	Dialer      Dialer
+	Remotes      []Remote
+	TLSCert      string
+	TLSKey       string
+	CACert       string
+	TLSCrypt     string
+	TLSAuth      string
+	KeyDirection *int   // nil = bidirectional (default), 0 or 1
+	Auth         string // HMAC algorithm for tls-auth: "SHA1", "SHA256", "SHA512"; default "SHA1"
+	Cipher       string
+	AuthNoCache  bool
+	Username     string
+	Password     string
+	IP           netip.Addr
+	Mask         netip.Prefix
+	MTU          int
+	DNS          []string
+	Dialer       Dialer
 }
 
 type Dialer interface {

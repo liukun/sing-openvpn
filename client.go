@@ -37,7 +37,7 @@ type Client struct {
 	tlsConn          *tls.Conn
 	controlConn      *ControlConn
 	handshakeStarted chan struct{}
-	tlsCrypt         *crypto.TLSCrypt
+	controlProtector crypto.ControlProtector
 	errChan          chan error
 
 	// Key material from key_method_2 exchange (for PRF key derivation)
@@ -86,11 +86,21 @@ func NewClient(ovpnContent []byte, username, password string, dialer Dialer) (*C
 
 	if cfg.TLSCrypt != "" {
 		tc, err := crypto.NewTLSCrypt(cfg.TLSCrypt)
-		if err == nil {
-			c.tlsCrypt = tc
-		} else {
-			log.Warnln("[OpenVPN] Failed to parse tls-crypt key: %v", err)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse tls-crypt key: %w", err)
 		}
+		c.controlProtector = tc
+	} else if cfg.TLSAuth != "" {
+		keyDir := -1
+		if cfg.KeyDirection != nil {
+			keyDir = *cfg.KeyDirection
+		}
+		ta, err := crypto.NewTLSAuth(cfg.TLSAuth, keyDir, cfg.Auth)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse tls-auth key: %w", err)
+		}
+		c.controlProtector = ta
+		log.Infoln("[OpenVPN] tls-auth enabled, key-direction=%d", keyDir)
 	}
 
 	return c, nil
