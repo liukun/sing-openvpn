@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/airofm/sing-openvpn/internal/log"
 	"github.com/airofm/sing-openvpn/internal/packet"
@@ -56,6 +57,7 @@ func (c *Client) tunReadLoop() {
 				continue
 			}
 
+			atomic.AddUint64(&c.bytesSent, uint64(sizes[i]))
 			log.Traceln("[OpenVPN] TUN read %d bytes, encrypted to %d bytes", sizes[i], len(ciphertext))
 			p := &packet.Packet{
 				Opcode:  c.dataOpcode,
@@ -89,6 +91,7 @@ func (c *Client) processIncomingData(data []byte) {
 	log.Traceln("[OpenVPN] TUN write: %d bytes plaintext", len(plaintext))
 
 	if len(plaintext) == 16 && bytes.Equal(plaintext, pingMagic) {
+		atomic.AddUint64(&c.pingsReceived, 1)
 		log.Traceln("[OpenVPN] Received OpenVPN ping")
 		return
 	}
@@ -127,5 +130,6 @@ func (c *Client) processIncomingData(data []byte) {
 		}
 	}
 
+	atomic.AddUint64(&c.bytesReceived, uint64(len(plaintext)))
 	c.tunDevice.Write([][]byte{plaintext}, 0)
 }

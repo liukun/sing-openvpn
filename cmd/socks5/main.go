@@ -77,11 +77,6 @@ func main() {
 		log.Fatalf("failed to read ovpn file: %v", err)
 	}
 
-	password, err := cfg.OpenVPN.resolvePassword()
-	if err != nil {
-		log.Fatalf("failed to resolve password: %v", err)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -89,8 +84,7 @@ func main() {
 
 	proxy := &vpnProxy{
 		ovpnContent:   ovpnContent,
-		username:      cfg.OpenVPN.Username,
-		password:      password,
+		ovpnCfg:       cfg.OpenVPN,
 		listen:        cfg.SOCKS5.Listen,
 		autoReconnect: autoReconnect,
 		cancel:        stop,
@@ -102,29 +96,19 @@ func main() {
 
 type vpnProxy struct {
 	ovpnContent   []byte
-	username      string
-	password      string
+	ovpnCfg       OpenVPNConfig
 	listen        string
 	autoReconnect bool
 	cancel        context.CancelFunc
 
-	mu       sync.RWMutex
-	client   *openvpn.Client
-	dns      string
-	firstUp  chan struct{} // closed on first successful connection
-	exitCode int
+	mu          sync.RWMutex
+	client      *openvpn.Client
+	dns         string
+	socksServer *socks5.Server
+	exitCode    int
 }
 
 func (p *vpnProxy) run(ctx context.Context) {
-	p.firstUp = make(chan struct{})
-	go p.connectLoop(ctx)
-
-	select {
-	case <-p.firstUp:
-	case <-ctx.Done():
-		return
-	}
-
 	server, err := socks5.New(&socks5.Config{
 		Dial:     p.dialContext,
 		Resolver: &vpnResolver{proxy: p},
@@ -132,28 +116,10 @@ func (p *vpnProxy) run(ctx context.Context) {
 	if err != nil {
 		log.Fatalf("failed to create socks5 server: %v", err)
 	}
+	p.socksServer = server
 
-	log.Printf("socks5 proxy listening on socks5://%s", p.listen)
-
-	ln, err := net.Listen("tcp", p.listen)
-	if err != nil {
-		log.Fatalf("listen failed: %v", err)
-	}
-
-	go func() {
-		<-ctx.Done()
-		ln.Close()
-	}()
-
-	if err := server.Serve(ln); err != nil && ctx.Err() == nil {
-		log.Fatalf("serve failed: %v", err)
-	}
-
-	p.mu.RLock()
-	if p.client != nil {
-		p.client.Close()
-	}
-	p.mu.RUnlock()
+	go p.statsLoop(ctx)
+	p.connectLoop(ctx)
 }
 
 func (p *vpnProxy) connectLoop(ctx context.Context) {
@@ -168,7 +134,15 @@ func (p *vpnProxy) connectLoop(ctx context.Context) {
 			return
 		}
 
-		client, err := openvpn.NewClient(p.ovpnContent, p.username, p.password, nil)
+		password, err := p.ovpnCfg.resolvePassword()
+		if err != nil {
+			log.Printf("failed to resolve password: %v", err)
+			delay = backoff(delay, maxDelay)
+			sleepCtx(ctx, delay)
+			continue
+		}
+
+		client, err := openvpn.NewClient(p.ovpnContent, p.ovpnCfg.Username, password, nil)
 		if err != nil {
 			log.Printf("failed to create openvpn client: %v", err)
 			delay = backoff(delay, maxDelay)
@@ -212,14 +186,28 @@ func (p *vpnProxy) connectLoop(ctx context.Context) {
 		delay = baseDelay
 		log.Printf("openvpn connected, ip=%s dns=%s", cfg.IP, dns)
 
-		select {
-		case <-p.firstUp:
-		default:
-			close(p.firstUp)
+		// Start SOCKS5 listener — only while VPN is up
+		ln, listenErr := net.Listen("tcp", p.listen)
+		if listenErr != nil {
+			log.Printf("listen failed: %v", listenErr)
+			client.Close()
+			delay = backoff(delay, maxDelay)
+			sleepCtx(ctx, delay)
+			continue
 		}
+		log.Printf("socks5 proxy listening on socks5://%s", p.listen)
+
+		serveDone := make(chan struct{})
+		go func() {
+			p.socksServer.Serve(ln)
+			close(serveDone)
+		}()
 
 		select {
 		case <-reconnect:
+			ln.Close()
+			<-serveDone
+			log.Printf("socks5 listener closed")
 			if !p.autoReconnect {
 				log.Printf("openvpn connection lost, auto_reconnect is disabled, exiting")
 				p.exitCode = 1
@@ -228,6 +216,8 @@ func (p *vpnProxy) connectLoop(ctx context.Context) {
 			}
 			log.Printf("openvpn connection lost, reconnecting...")
 		case <-ctx.Done():
+			ln.Close()
+			<-serveDone
 			client.Close()
 			return
 		}
@@ -282,6 +272,40 @@ func (r *vpnResolver) Resolve(ctx context.Context, name string) (context.Context
 		return ctx, addrs[0].IP, nil
 	}
 	return ctx, nil, fmt.Errorf("no address found for %s", name)
+}
+
+func (p *vpnProxy) statsLoop(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			client, _ := p.getClient()
+			if client == nil || !client.IsAlive() {
+				continue
+			}
+			s := client.Stats()
+			uptime := strings.TrimSuffix(time.Since(s.ConnectedAt).Round(time.Minute).String(), "0s")
+			log.Printf("[stats] uptime=%s ping_tx=%d ping_rx=%d tx=%s rx=%s",
+				uptime, s.PingsSent, s.PingsReceived,
+				formatBytes(s.BytesSent), formatBytes(s.BytesReceived))
+		}
+	}
+}
+
+func formatBytes(b uint64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.2f GiB", float64(b)/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.2f MiB", float64(b)/(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.2f KiB", float64(b)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
 func backoff(current, max time.Duration) time.Duration {

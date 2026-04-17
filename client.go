@@ -35,6 +35,12 @@ type Client struct {
 	lastSend     int64 // unix timestamp in seconds, updated on any packet sent
 	alive        int32 // 1 = alive, 0 = dead (atomic)
 
+	connectedAt   time.Time
+	pingsSent     uint64
+	pingsReceived uint64
+	bytesSent     uint64 // plaintext bytes written to tunnel
+	bytesReceived uint64 // plaintext bytes read from tunnel
+
 	tlsConn          *tls.Conn
 	controlConn      *ControlConn
 	handshakeStarted chan struct{}
@@ -197,6 +203,7 @@ func (c *Client) Dial(ctx context.Context) error {
 
 	// Mark connection as alive
 	atomic.StoreInt32(&c.alive, 1)
+	c.connectedAt = time.Now()
 
 	// Wait for route-delay: the server needs this time to set up its routing/NAT.
 	// Packets sent before this delay expires will be silently dropped by the server.
@@ -358,6 +365,26 @@ func (c *Client) IsAlive() bool {
 	return atomic.LoadInt32(&c.alive) == 1
 }
 
+// Stats holds a snapshot of connection statistics.
+type Stats struct {
+	ConnectedAt   time.Time
+	PingsSent     uint64
+	PingsReceived uint64
+	BytesSent     uint64
+	BytesReceived uint64
+}
+
+// Stats returns a snapshot of the current connection statistics.
+func (c *Client) Stats() Stats {
+	return Stats{
+		ConnectedAt:   c.connectedAt,
+		PingsSent:     atomic.LoadUint64(&c.pingsSent),
+		PingsReceived: atomic.LoadUint64(&c.pingsReceived),
+		BytesSent:     atomic.LoadUint64(&c.bytesSent),
+		BytesReceived: atomic.LoadUint64(&c.bytesReceived),
+	}
+}
+
 // SetOnClose registers a callback that is invoked when the connection dies.
 func (c *Client) SetOnClose(fn func()) {
 	c.onClose = fn
@@ -415,6 +442,7 @@ func (c *Client) pingLoop() {
 						c.errChan <- writeErr
 						return
 					}
+					atomic.AddUint64(&c.pingsSent, 1)
 				}
 			}
 		}

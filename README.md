@@ -31,9 +31,9 @@
 - **滑动窗口防重放攻击 (Replay Protection)**：
   - 实现了基于 `uint64` 位掩码 (Bitmask) 的无锁防重放滑动窗口 (`ReplayWindow`)。
   - 在进行昂贵的 AES 解密前，**Fast-path** 优先校验 Packet ID，精准拦截恶意重放攻击与过期乱序包。
-- **智能断线重连 (Ping-Restart)**：
-  - 内置 `pingLoop` 协程，每 10 秒发送 OpenVPN 标准 `Ping Magic` 维持 NAT 会话。
-  - 基于无锁原子操作 (`atomic`) 记录最后活跃时间，超过 60 秒未收到服务端数据则主动抛出 `ping timeout` 断开连接，彻底解决弱网下的“假死/断流”问题。
+- **OpenVPN 标准 Keepalive**：
+  - 内置 `pingLoop` 协程，按服务端推送的 `ping-restart N` 取 `N/2` 作为发送间隔，持续发送 `Ping Magic` 维持 NAT 会话（若服务端未推送则默认 10 秒）。
+  - 基于无锁原子操作 (`atomic`) 记录最后活跃时间，超过 `ping-restart` 秒未收到服务端数据则主动断开连接，彻底解决弱网下的“假死/断流”问题。
 
 ## 📦 安装
 
@@ -102,6 +102,12 @@ func main() {
 go build -tags with_gvisor -o socks5 ./cmd/socks5/
 ```
 
+或无需编译直接运行：
+
+```bash
+go run -tags with_gvisor ./cmd/socks5/ config.toml
+```
+
 ### 配置文件
 
 创建 TOML 配置文件（参考 `cmd/socks5/config.example.toml`）：
@@ -140,8 +146,6 @@ password = "mypassword"
 ```
 
 启动后即可将浏览器或其他应用的代理设置指向 `socks5://127.0.0.1:6080`。
-
-默认启用自动重连：VPN 断线后会以指数退避策略重试。设置 `auto_reconnect = false` 可关闭此行为，断线后进程将直接退出。
 
 ### 已知行为
 
