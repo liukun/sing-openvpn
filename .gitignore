@@ -37,6 +37,9 @@ Thumbs.db
 test
 /socks5
 
+# Go build cache (when GOCACHE points at repo)
+.gocache/
+
 # Project specific ignores
 *.ovpn
 *.crt

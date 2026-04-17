@@ -11,22 +11,22 @@ import (
 	"github.com/airofm/sing-openvpn/internal/packet"
 )
 
-// ControlConn implements net.Conn to provide a reliable stream over OpenVPN control channel
+// ControlConn implements net.Conn over the OpenVPN reliable control channel,
+// bound to a single session. Each session has its own instance.
 type ControlConn struct {
-	client       *Client
+	sess *session
+
 	readBuffer   []byte
 	readMu       sync.Mutex
 	readCond     *sync.Cond
 	closed       bool
-	readDeadline time.Time // zero = no deadline
+	readDeadline time.Time
 
 	writeMu sync.Mutex
 }
 
-func NewControlConn(client *Client) *ControlConn {
-	c := &ControlConn{
-		client: client,
-	}
+func newControlConn(sess *session) *ControlConn {
+	c := &ControlConn{sess: sess}
 	c.readCond = sync.NewCond(&c.readMu)
 	return c
 }
@@ -36,19 +36,14 @@ func (c *ControlConn) Read(b []byte) (n int, err error) {
 	defer c.readMu.Unlock()
 
 	for len(c.readBuffer) == 0 && !c.closed {
-		// Check deadline before waiting
 		if !c.readDeadline.IsZero() {
 			remaining := time.Until(c.readDeadline)
 			if remaining <= 0 {
 				return 0, os.ErrDeadlineExceeded
 			}
-			// Use a timer to wake us up when the deadline expires
-			timer := time.AfterFunc(remaining, func() {
-				c.readCond.Broadcast()
-			})
+			timer := time.AfterFunc(remaining, func() { c.readCond.Broadcast() })
 			c.readCond.Wait()
 			timer.Stop()
-			// Re-check deadline after waking
 			if len(c.readBuffer) == 0 && !c.closed && !c.readDeadline.IsZero() && time.Now().After(c.readDeadline) {
 				return 0, os.ErrDeadlineExceeded
 			}
@@ -79,8 +74,8 @@ func (c *ControlConn) Write(b []byte) (n int, err error) {
 	// plus controlProtector overhead (tls-crypt: 40B, tls-auth: 28B+).
 	// Stay under ~1400 bytes UDP payload (safe for most paths).
 	protectorOverhead := 0
-	if c.client.controlProtector != nil {
-		protectorOverhead = c.client.controlProtector.Overhead()
+	if c.sess.controlProtector != nil {
+		protectorOverhead = c.sess.controlProtector.Overhead()
 	}
 	maxPayload := 1400 - 14 - protectorOverhead
 
@@ -94,22 +89,20 @@ func (c *ControlConn) Write(b []byte) (n int, err error) {
 
 		p := &packet.Packet{
 			Opcode:    packet.OpControlV1,
-			SessionID: c.client.localSID,
-			PacketID:  c.client.getNextPacketID(),
+			SessionID: c.sess.localSID,
+			PacketID:  c.sess.getNextPacketID(),
 			Payload:   fragment,
 		}
 
 		ackCh := make(chan struct{})
-		c.client.ackWaiters.Store(p.PacketID, ackCh)
+		c.sess.ackWaiters.Store(p.PacketID, ackCh)
 
 		sent := false
 		for attempt := 0; attempt < 5; attempt++ {
-			if err := c.client.writePacket(p); err != nil {
-				c.client.ackWaiters.Delete(p.PacketID)
+			if err := c.sess.writePacket(p); err != nil {
+				c.sess.ackWaiters.Delete(p.PacketID)
 				return offset, err
 			}
-
-			// Wait for ACK with exponential backoff: 1s, 2s, 4s, 8s, 8s
 			backoff := time.Duration(1<<uint(attempt)) * time.Second
 			if backoff > 8*time.Second {
 				backoff = 8 * time.Second
@@ -119,12 +112,11 @@ func (c *ControlConn) Write(b []byte) (n int, err error) {
 				sent = true
 				goto Acked
 			case <-time.After(backoff):
-				// Timeout, will retry in next loop iteration
 			}
 		}
 	Acked:
 		if !sent {
-			c.client.ackWaiters.Delete(p.PacketID)
+			c.sess.ackWaiters.Delete(p.PacketID)
 			return offset, errors.New("control packet reliable send failed: timeout")
 		}
 	}
@@ -140,31 +132,22 @@ func (c *ControlConn) Close() error {
 	return nil
 }
 
-func (c *ControlConn) LocalAddr() net.Addr {
-	return c.client.conn.LocalAddr()
-}
+func (c *ControlConn) LocalAddr() net.Addr  { return c.sess.conn.LocalAddr() }
+func (c *ControlConn) RemoteAddr() net.Addr { return c.sess.conn.RemoteAddr() }
 
-func (c *ControlConn) RemoteAddr() net.Addr {
-	return c.client.conn.RemoteAddr()
-}
-
-func (c *ControlConn) SetDeadline(t time.Time) error {
-	return c.SetReadDeadline(t)
-}
+func (c *ControlConn) SetDeadline(t time.Time) error { return c.SetReadDeadline(t) }
 
 func (c *ControlConn) SetReadDeadline(t time.Time) error {
 	c.readMu.Lock()
 	c.readDeadline = t
-	c.readCond.Broadcast() // wake any waiting Read so it can re-check
+	c.readCond.Broadcast()
 	c.readMu.Unlock()
 	return nil
 }
 
-func (c *ControlConn) SetWriteDeadline(t time.Time) error {
-	return nil
-}
+func (c *ControlConn) SetWriteDeadline(t time.Time) error { return nil }
 
-// FeedData is called by the client's read loop when an packet.OpControlV1 packet is received
+// FeedData is called by the session's read loop when an OpControlV1 packet arrives.
 func (c *ControlConn) FeedData(data []byte) {
 	c.readMu.Lock()
 	c.readBuffer = append(c.readBuffer, data...)

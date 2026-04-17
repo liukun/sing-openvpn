@@ -8,6 +8,7 @@
 
 - **纯用户态实现**：内置 gVisor TUN 栈，无需操作系统 TUN 接口及管理员权限。
 - **协议支持**：支持 OpenVPN UDP 和 TCP 协议连接，支持 `.ovpn` 配置文件解析。
+- **多 Remote 并发竞速**：对 `.ovpn` 中的多个 `remote` 并行发起连接与握手，首个成功者胜出，其余 session 自动回收，显著降低多出口场景下的拨号时延。
 - **TLS 控制通道**：
   - 完整的 TLS 握手及密钥交换 (`key_method_2`)。
   - 支持 `tls-auth`（HMAC 认证）和 `tls-crypt` (V1)（加密+认证）两种控制通道保护模式。
@@ -53,20 +54,17 @@ package main
 import (
 	"context"
 	"log"
-	"os"
 
 	openvpn "github.com/airofm/sing-openvpn"
 )
 
 func main() {
-	// 1. 读取 .ovpn 配置文件内容并初始化客户端
+	// 1. 初始化 OpenVPN 客户端
 	// 也可以传入空字符串作为账号密码，如果服务器不需要密码认证
 	// 最后一个参数 dialer 可用于指定底层网络连接方式（在集成到 sing-box/mihomo 等环境时可传入其 Dialer，直接使用直连可传 nil）
-	ovpnContent, err := os.ReadFile("config.ovpn")
-	if err != nil {
-		log.Fatalf("Read config error: %v", err)
-	}
-	client, err := openvpn.NewClient(ovpnContent, "your_username", "your_password", nil)
+	// 推荐使用 NewClientFromFile：它会按照 OpenVPN CLI 的规则，把 .ovpn 中 ca/cert/key/tls-auth/tls-crypt
+	// 的相对路径解析到配置文件所在目录。若只有 .ovpn 的字节内容，可用 NewClient，但此时相对路径无法解析。
+	client, err := openvpn.NewClientFromFile("config.ovpn", "your_username", "your_password", nil)
 	if err != nil {
 		log.Fatalf("Init error: %v", err)
 	}
@@ -156,7 +154,8 @@ password = "mypassword"
 ## 🏗 架构说明
 
 - **`config.go` / `parser.go`**: 外部配置模型及高度鲁棒的 `.ovpn` 配置文件解析器。
-- **`client.go`**: 客户端核心逻辑，负责连接管理、`Dial` 核心逻辑、Ping-Restart 保活以及 `ListenPacket`/`DialContext` 接口。
+- **`client.go`**: 对外入口。持有 Config 级不可变状态（TLS 配置、CA 池），负责多 remote 并发 Dial 竞速（first-success-wins，失败者自动回收）以及 `ListenPacket`/`DialContext` 代理接口。
+- **`session.go`**: 单次物理连接的所有每连接状态：底层 `net.Conn`、TLS 会话、控制通道保护器、数据通道密钥/cipher、TUN 设备、ping 保活、errorMonitor 生命周期。多个 session 可在 Dial 竞速期间并行存在，只有胜出者会被挂到 `Client.active`。
 - **`control.go`**: 可靠的控制通道，实现了基于 Packet ID 的 ACK 确认和带超时的滑动重传队列。
 - **`handshake.go`**: 握手流程，处理 TLS 握手、`key_method_2` 密钥交换及 `PUSH_REPLY` 配置协商。
 - **`transport.go`**: 传输层核心：无锁高吞吐的 UDP/TCP 读写循环事件总线。

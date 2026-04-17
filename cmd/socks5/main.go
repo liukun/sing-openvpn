@@ -76,18 +76,13 @@ func main() {
 		ovpnlog.SetLevel(level)
 	}
 
-	ovpnContent, err := os.ReadFile(cfg.OpenVPN.OVPNFile)
-	if err != nil {
-		log.Fatalf("failed to read ovpn file: %v", err)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	autoReconnect := cfg.SOCKS5.AutoReconnect == nil || *cfg.SOCKS5.AutoReconnect
 
 	proxy := &vpnProxy{
-		ovpnContent:   ovpnContent,
+		ovpnFile:      cfg.OpenVPN.OVPNFile,
 		ovpnCfg:       cfg.OpenVPN,
 		listen:        cfg.SOCKS5.Listen,
 		autoReconnect: autoReconnect,
@@ -99,7 +94,7 @@ func main() {
 }
 
 type vpnProxy struct {
-	ovpnContent   []byte
+	ovpnFile      string
 	ovpnCfg       OpenVPNConfig
 	listen        string
 	autoReconnect bool
@@ -145,7 +140,7 @@ func (p *vpnProxy) connectLoop(ctx context.Context) {
 			continue
 		}
 
-		client, err := openvpn.NewClient(p.ovpnContent, p.ovpnCfg.Username, password, nil)
+		client, err := openvpn.NewClientFromFile(p.ovpnFile, p.ovpnCfg.Username, password, nil)
 		if err != nil {
 			log.Printf("failed to create openvpn client: %v", err)
 			delay = backoff(delay, maxDelay)

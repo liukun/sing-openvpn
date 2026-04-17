@@ -15,6 +15,17 @@ func ParseOVPN(data []byte) (*Config, error) {
 	return parseOVPN(data, "")
 }
 
+// ParseOVPNFile reads an OpenVPN configuration from path. Relative filenames
+// on ca/cert/key/tls-auth/tls-crypt directives are resolved against the
+// config file's directory, matching the OpenVPN CLI.
+func ParseOVPNFile(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return parseOVPN(data, filepath.Dir(path))
+}
+
 func parseOVPN(data []byte, baseDir string) (*Config, error) {
 	cfg := &Config{}
 	scanner := bufio.NewScanner(bytes.NewReader(data))
