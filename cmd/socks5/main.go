@@ -245,6 +245,13 @@ func (p *vpnProxy) dialContext(ctx context.Context, network, addr string) (net.C
 type socks5Logger struct{}
 
 func (socks5Logger) Errorf(format string, args ...interface{}) {
+	// things-go/go-socks5 logs this at "error" level on every successful UDP
+	// ASSOCIATE setup; it's actually an info message about the allocated relay
+	// port. Downgrade so it doesn't drown real errors.
+	if strings.HasPrefix(format, "client want to used addr") {
+		ovpnlog.Traceln("[socks5] "+format, args...)
+		return
+	}
 	ovpnlog.Errorln("[socks5] "+format, args...)
 }
 
