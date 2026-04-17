@@ -149,7 +149,9 @@ password = "mypassword"
 
 ### 已知行为
 
-- 日志中可能出现 `[ERR] socks: Failed to get version byte: EOF`，这是 go-socks5 库在客户端未发送数据就断开时打印的（如浏览器预连接、健康检查等），属于正常现象，可忽略。
+- 仅限本机使用：`socks5.listen = 127.0.0.1:6080`（UDP 也只对本机可用）。
+- 供局域网使用：`socks5.listen = 0.0.0.0:6080`（所有网卡）或 `192.168.x.x:6080`（指定网卡 IP）均可。UDP BND.ADDR 会自动对齐到 TCP 连接的本地 IP，客户端无需额外配置。
+- 客户端未发送数据就断开时（如浏览器预连接、健康检查）可能看到 `[socks5] server: failed to authenticate: ...` 级别日志，属于正常现象，可忽略。
 
 ## 🏗 架构说明
 

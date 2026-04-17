@@ -19,7 +19,7 @@ import (
 	"github.com/BurntSushi/toml"
 	openvpn "github.com/airofm/sing-openvpn"
 	ovpnlog "github.com/airofm/sing-openvpn/internal/log"
-	"github.com/armon/go-socks5"
+	"github.com/things-go/go-socks5"
 )
 
 type Config struct {
@@ -112,14 +112,11 @@ type vpnProxy struct {
 }
 
 func (p *vpnProxy) run(ctx context.Context) {
-	server, err := socks5.New(&socks5.Config{
-		Dial:     p.dialContext,
-		Resolver: &vpnResolver{proxy: p},
-	})
-	if err != nil {
-		log.Fatalf("failed to create socks5 server: %v", err)
-	}
-	p.socksServer = server
+	p.socksServer = socks5.NewServer(
+		socks5.WithDial(p.dialContext),
+		socks5.WithResolver(&vpnResolver{proxy: p}),
+		socks5.WithLogger(socks5Logger{}),
+	)
 
 	go p.statsLoop(ctx)
 	p.connectLoop(ctx)
@@ -239,6 +236,12 @@ func (p *vpnProxy) dialContext(ctx context.Context, network, addr string) (net.C
 		return nil, fmt.Errorf("openvpn not connected")
 	}
 	return client.DialContext(ctx, network, addr)
+}
+
+type socks5Logger struct{}
+
+func (socks5Logger) Errorf(format string, args ...interface{}) {
+	ovpnlog.Errorln("[socks5] "+format, args...)
 }
 
 // vpnResolver resolves DNS through the VPN tunnel.
