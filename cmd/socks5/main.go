@@ -34,15 +34,18 @@ type SOCKS5Config struct {
 }
 
 type OpenVPNConfig struct {
-	OVPNFile       string `toml:"ovpn_file"`
-	Username       string `toml:"username"`
-	Password       string `toml:"password"`
-	PasswordScript string `toml:"password_script"`
+	OVPNFile       string   `toml:"ovpn_file"`
+	Username       string   `toml:"username"`
+	Password       string   `toml:"password"`
+	PasswordScript []string `toml:"password_script"`
 }
 
 func (c *OpenVPNConfig) resolvePassword() (string, error) {
-	if c.PasswordScript != "" {
-		out, err := osexec.Command("bash", c.PasswordScript).Output()
+	if len(c.PasswordScript) > 0 {
+		if c.PasswordScript[0] == "" {
+			return "", fmt.Errorf("password_script[0] (command) is empty")
+		}
+		out, err := osexec.Command(c.PasswordScript[0], c.PasswordScript[1:]...).Output()
 		if err != nil {
 			return "", fmt.Errorf("password script failed: %w", err)
 		}

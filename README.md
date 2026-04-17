@@ -126,7 +126,7 @@ username = "myuser"
 
 # 二选一：明文密码 或 脚本动态获取
 password = "mypassword"
-# password_script = "/path/to/get-password.sh"
+# password_script = ["bash", "/path/to/get-password.sh"]
 ```
 
 | 字段 | 说明 |
@@ -137,7 +137,7 @@ password = "mypassword"
 | `openvpn.ovpn_file` | `.ovpn` 配置文件路径 |
 | `openvpn.username` | 用户名 |
 | `openvpn.password` | 明文密码 |
-| `openvpn.password_script` | 密码脚本路径（优先级高于 `password`），脚本输出的第一行作为密码 |
+| `openvpn.password_script` | 取密码的命令（列表形式，argv[0] 为可执行文件，其余为参数，优先级高于 `password`），脚本输出的第一行作为密码。例：`["bash", "/path/to/get-password.sh"]` |
 
 ### 运行
 
