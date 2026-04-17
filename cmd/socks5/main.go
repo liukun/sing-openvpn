@@ -19,6 +19,7 @@ import (
 	"github.com/BurntSushi/toml"
 	openvpn "github.com/airofm/sing-openvpn"
 	ovpnlog "github.com/airofm/sing-openvpn/internal/log"
+	"github.com/metacubex/sing/common/cache"
 	"github.com/things-go/go-socks5"
 )
 
@@ -108,10 +109,12 @@ type vpnProxy struct {
 	client      *openvpn.Client
 	dns         string
 	socksServer *socks5.Server
+	dnsCache    *dnsCache
 	exitCode    int
 }
 
 func (p *vpnProxy) run(ctx context.Context) {
+	p.dnsCache = newDNSCache(60*time.Second, 1024)
 	p.socksServer = socks5.NewServer(
 		socks5.WithDial(p.dialContext),
 		socks5.WithResolver(&vpnResolver{proxy: p}),
@@ -182,6 +185,7 @@ func (p *vpnProxy) connectLoop(ctx context.Context) {
 		p.client = client
 		p.dns = dns
 		p.mu.Unlock()
+		p.dnsCache.clear()
 
 		delay = baseDelay
 		log.Printf("openvpn connected, ip=%s dns=%s", cfg.IP, dns)
@@ -250,12 +254,22 @@ type vpnResolver struct {
 }
 
 func (r *vpnResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	ip, err := r.proxy.dnsCache.resolve(name, func() (net.IP, error) {
+		return r.lookup(ctx, name)
+	})
+	if err != nil {
+		return ctx, nil, err
+	}
+	return ctx, ip, nil
+}
+
+func (r *vpnResolver) lookup(ctx context.Context, name string) (net.IP, error) {
 	client, dnsAddr := r.proxy.getClient()
 	if client == nil || !client.IsAlive() {
-		return ctx, nil, fmt.Errorf("openvpn not connected")
+		return nil, fmt.Errorf("openvpn not connected")
 	}
 	if dnsAddr == "" {
-		return ctx, nil, fmt.Errorf("no vpn dns server available")
+		return nil, fmt.Errorf("no vpn dns server available")
 	}
 
 	resolver := &net.Resolver{
@@ -267,17 +281,85 @@ func (r *vpnResolver) Resolve(ctx context.Context, name string) (context.Context
 
 	addrs, err := resolver.LookupIPAddr(ctx, name)
 	if err != nil {
-		return ctx, nil, err
+		return nil, err
 	}
 	for _, a := range addrs {
 		if ip := a.IP.To4(); ip != nil {
-			return ctx, ip, nil
+			return ip, nil
 		}
 	}
 	if len(addrs) > 0 {
-		return ctx, addrs[0].IP, nil
+		return addrs[0].IP, nil
 	}
-	return ctx, nil, fmt.Errorf("no address found for %s", name)
+	return nil, fmt.Errorf("no address found for %s", name)
+}
+
+type dnsCache struct {
+	lru      *cache.LruCache[string, net.IP]
+	mu       sync.Mutex
+	gen      uint64
+	inflight map[string]*dnsFlight
+}
+
+type dnsFlight struct {
+	done chan struct{}
+	ip   net.IP
+	err  error
+}
+
+func newDNSCache(ttl time.Duration, maxSize int) *dnsCache {
+	return &dnsCache{
+		lru: cache.New(
+			cache.WithAge[string, net.IP](int64(ttl/time.Second)),
+			cache.WithSize[string, net.IP](maxSize),
+		),
+		inflight: make(map[string]*dnsFlight),
+	}
+}
+
+// resolve returns a cached IP for name; on miss it runs do() once even under
+// concurrent callers for the same name, and stores the successful result.
+// Failures are not cached, and results whose lookup raced with clear() are
+// discarded so they don't outlive the VPN connection that produced them.
+func (c *dnsCache) resolve(name string, do func() (net.IP, error)) (ip net.IP, err error) {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+
+	c.mu.Lock()
+	if v, ok := c.lru.Load(name); ok {
+		c.mu.Unlock()
+		return v, nil
+	}
+	if f, ok := c.inflight[name]; ok {
+		c.mu.Unlock()
+		<-f.done
+		return f.ip, f.err
+	}
+	f := &dnsFlight{done: make(chan struct{})}
+	c.inflight[name] = f
+	myGen := c.gen
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		delete(c.inflight, name)
+		fresh := err == nil && ip != nil && c.gen == myGen
+		c.mu.Unlock()
+		if fresh {
+			c.lru.Store(name, ip)
+		}
+		f.ip, f.err = ip, err
+		close(f.done)
+	}()
+
+	ip, err = do()
+	return
+}
+
+func (c *dnsCache) clear() {
+	c.mu.Lock()
+	c.gen++
+	c.mu.Unlock()
+	c.lru.Clear()
 }
 
 func (p *vpnProxy) statsLoop(ctx context.Context) {
