@@ -88,8 +88,21 @@ func (s *session) processIncomingData(data []byte) {
 			dumpLen = len(data)
 		}
 		log.Warnln("[OpenVPN] Data decrypt error: %v (len=%d, hex=%s)", errDec, len(data), hex.EncodeToString(data[:dumpLen]))
+		s.consecutiveDecryptFails++
+		if s.consecutiveDecryptFails == decryptFailBurstThreshold {
+			// Reset before the send so a full errChan (default arm) doesn't
+			// pin the counter at threshold and silence every future burst.
+			s.consecutiveDecryptFails = 0
+			select {
+			case s.errChan <- fmt.Errorf("data channel decrypt failures: %d consecutive packets, key desync likely", decryptFailBurstThreshold):
+			case <-s.ctx.Done():
+			default:
+			}
+		}
 		return
 	}
+	s.consecutiveDecryptFails = 0
+	s.updateActivity()
 
 	log.Traceln("[OpenVPN] TUN write: %d bytes plaintext", len(plaintext))
 

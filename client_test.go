@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/airofm/sing-openvpn/internal/packet"
 	M "github.com/metacubex/sing/common/metadata"
 	"github.com/metacubex/wireguard-go/tun"
 )
@@ -658,5 +659,141 @@ func TestNewClientFromFile_RelativePaths(t *testing.T) {
 
 	if got := client.GetConfig().CACert; got != caPEM {
 		t.Fatalf("CA not loaded via NewClientFromFile:\n got: %q\nwant: %q", got, caPEM)
+	}
+}
+
+// --- decrypt-failure activity gating + burst trigger ---
+
+type failingCipher struct{}
+
+func (failingCipher) Encrypt(_ []byte, _ []byte) ([]byte, error) {
+	return nil, errors.New("not implemented")
+}
+func (failingCipher) Decrypt(_ []byte, _ []byte) ([]byte, error) {
+	return nil, errors.New("message authentication failed")
+}
+
+type passthroughCipher struct{}
+
+func (passthroughCipher) Encrypt(p []byte, _ []byte) ([]byte, error) { return p, nil }
+func (passthroughCipher) Decrypt(c []byte, _ []byte) ([]byte, error) { return c, nil }
+
+func TestProcessIncomingData_DecryptFailDoesNotUpdateActivity(t *testing.T) {
+	s := newTestSession()
+	s.cipher = failingCipher{}
+
+	atomic.StoreInt64(&s.lastActivity, 0)
+	s.processIncomingData([]byte{0xde, 0xad, 0xbe, 0xef})
+
+	if got := atomic.LoadInt64(&s.lastActivity); got != 0 {
+		t.Fatalf("lastActivity must stay 0 on decrypt failure, got %d", got)
+	}
+}
+
+func TestProcessIncomingData_DecryptOKUpdatesActivity(t *testing.T) {
+	s := newTestSession()
+	s.cipher = passthroughCipher{}
+
+	atomic.StoreInt64(&s.lastActivity, 0)
+	ipv4 := make([]byte, 40)
+	ipv4[0] = 0x45
+	s.processIncomingData(ipv4)
+
+	if got := atomic.LoadInt64(&s.lastActivity); got == 0 {
+		t.Fatal("lastActivity must be updated after successful decrypt")
+	}
+}
+
+func TestProcessIncomingData_DecryptFailBurstTriggersErrChan(t *testing.T) {
+	s := newTestSession()
+	s.cipher = failingCipher{}
+
+	for i := 0; i < decryptFailBurstThreshold-1; i++ {
+		s.processIncomingData([]byte{0x00})
+		select {
+		case err := <-s.errChan:
+			t.Fatalf("errChan fired prematurely at iteration %d: %v", i, err)
+		default:
+		}
+	}
+	s.processIncomingData([]byte{0x00})
+
+	select {
+	case err := <-s.errChan:
+		if err == nil {
+			t.Fatal("errChan delivered nil error")
+		}
+	default:
+		t.Fatal("burst threshold did not trigger errChan")
+	}
+
+	// After firing the counter resets; another full burst must re-trigger so
+	// a temporarily-full errChan can't permanently silence the detector.
+	for i := 0; i < decryptFailBurstThreshold; i++ {
+		s.processIncomingData([]byte{0x00})
+	}
+	select {
+	case <-s.errChan:
+	default:
+		t.Fatal("counter did not reset after first burst; second burst lost")
+	}
+}
+
+func TestHandlePacket_DataOpcodeDoesNotUpdateActivityWithoutDecrypt(t *testing.T) {
+	s := newTestSession()
+	s.cipher = failingCipher{}
+	atomic.StoreInt64(&s.lastActivity, 0)
+
+	p := &packet.Packet{
+		Opcode:  packet.OpDataV2,
+		Payload: []byte{0xde, 0xad, 0xbe, 0xef},
+	}
+	s.handlePacket(p)
+
+	if got := atomic.LoadInt64(&s.lastActivity); got != 0 {
+		t.Fatalf("data packet with failing decrypt must not update activity, got %d", got)
+	}
+}
+
+func TestHandlePacket_ControlOpcodeUpdatesActivity(t *testing.T) {
+	s := newTestSession()
+	atomic.StoreInt64(&s.lastActivity, 0)
+
+	p := &packet.Packet{Opcode: packet.OpAckV1}
+	s.handlePacket(p)
+
+	if got := atomic.LoadInt64(&s.lastActivity); got == 0 {
+		t.Fatal("control packet must update activity on successful parse")
+	}
+}
+
+// Stats() must keep returning the dead session's counters after Close so a
+// reconnect loop can ask "did this connection ever carry traffic?" — the
+// signal we use to pick fresh-baseDelay vs exponential-backoff retry.
+func TestStats_AfterCloseReturnsLastSessionCounters(t *testing.T) {
+	c := newTestClient()
+	s := c.attachLiveSession()
+	atomic.StoreUint64(&s.bytesReceived, 12345)
+	atomic.StoreUint64(&s.bytesSent, 678)
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	got := c.Stats()
+	if got.BytesReceived != 12345 {
+		t.Fatalf("Stats().BytesReceived after Close = %d, want 12345", got.BytesReceived)
+	}
+	if got.BytesSent != 678 {
+		t.Fatalf("Stats().BytesSent after Close = %d, want 678", got.BytesSent)
+	}
+}
+
+func TestStats_NoSessionReturnsZero(t *testing.T) {
+	c := newTestClient()
+	defer c.cancel()
+
+	if got := c.Stats(); got.BytesReceived != 0 || got.BytesSent != 0 {
+		t.Fatalf("Stats() with no session must be zero, got %+v", got)
 	}
 }

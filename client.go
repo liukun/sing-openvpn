@@ -31,8 +31,9 @@ type Client struct {
 	// startLoops) with Close. Without it, Close can interleave between Store
 	// and startLoops (or between the pre-publish ctx check and Store),
 	// resurrecting a winner onto a client that already fired Close.
-	publishMu sync.Mutex
-	closed    bool // guarded by publishMu
+	publishMu  sync.Mutex
+	closed     bool  // guarded by publishMu
+	finalStats Stats // last session's counters, captured in Close (publishMu)
 
 	active atomic.Pointer[session] // set once a winning session is chosen
 }
@@ -306,6 +307,9 @@ func (c *Client) Close() error {
 		c.closed = true
 		c.cancel()
 		s := c.active.Swap(nil)
+		if s != nil {
+			c.finalStats = s.snapshotStats()
+		}
 		c.publishMu.Unlock()
 		if s != nil {
 			err = s.close()
@@ -332,14 +336,16 @@ func (c *Client) IsAlive() bool {
 	return s != nil && s.isAlive()
 }
 
-// Stats returns a snapshot of the active session's counters, or the zero
-// value if no session has won yet.
+// Stats returns a snapshot of the active session's counters. After Close it
+// returns the dead session's last counters so callers (e.g. reconnect loops)
+// can decide whether the connection actually carried traffic.
 func (c *Client) Stats() Stats {
-	s := c.active.Load()
-	if s == nil {
-		return Stats{}
+	if s := c.active.Load(); s != nil {
+		return s.snapshotStats()
 	}
-	return s.snapshotStats()
+	c.publishMu.Lock()
+	defer c.publishMu.Unlock()
+	return c.finalStats
 }
 
 // DialContext opens a TCP connection through the VPN tunnel.

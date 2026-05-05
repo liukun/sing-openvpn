@@ -76,6 +76,9 @@ type session struct {
 	lastSend      int64
 	alive         int32
 
+	// No lock: touched only from the transport dispatch goroutine.
+	consecutiveDecryptFails uint32
+
 	ctx       context.Context
 	cancel    context.CancelFunc
 	closeOnce sync.Once
@@ -299,6 +302,11 @@ func (s *session) errorMonitor() {
 }
 
 var pingMagic = []byte{0x2a, 0x18, 0x7b, 0xf3, 0x64, 0x1e, 0xb4, 0xcb, 0x07, 0xed, 0x2d, 0x0a, 0x98, 0x1f, 0xc7, 0x48}
+
+// decryptFailBurstThreshold is the number of back-to-back AEAD failures, with
+// no successful decrypt in between, that triggers a fast reconnect — well
+// before the keepalive ping timeout would have noticed.
+const decryptFailBurstThreshold = 20
 
 func (s *session) pingLoop() {
 	ticker := time.NewTicker(time.Duration(s.pingInterval) * time.Second)

@@ -154,12 +154,15 @@ func (s *session) writePacket(p *packet.Packet) error {
 }
 
 func (s *session) handlePacket(p *packet.Packet) {
-	s.updateActivity()
 	if log.IsTraceEnabled() {
 		log.Traceln("[OpenVPN] Received packet: %s, session ID: %x, packet ID: %d", packet.OpcodeToString(p.Opcode), p.SessionID, p.PacketID)
 	}
 
 	if p.Opcode != packet.OpDataV1 && p.Opcode != packet.OpDataV2 {
+		// Control packets are MAC-checked by controlProtector.Unwrap before
+		// reaching here; data packets aren't, so their activity update is
+		// deferred to processIncomingData (post-AEAD).
+		s.updateActivity()
 		for _, ack := range p.Acks {
 			if chI, ok := s.ackWaiters.Load(ack); ok {
 				ch := chI.(chan struct{})
