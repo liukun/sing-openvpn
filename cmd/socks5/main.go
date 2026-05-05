@@ -182,7 +182,6 @@ func (p *vpnProxy) connectLoop(ctx context.Context) {
 		p.mu.Unlock()
 		p.dnsCache.clear()
 
-		delay = baseDelay
 		log.Printf("openvpn connected, ip=%s dns=%s", cfg.IP, dns)
 
 		// Start SOCKS5 listener — only while VPN is up
@@ -213,7 +212,20 @@ func (p *vpnProxy) connectLoop(ctx context.Context) {
 				p.cancel()
 				return
 			}
-			log.Printf("openvpn connection lost, reconnecting...")
+			// Reset backoff only if the data plane proved working — pings or
+			// user traffic. Otherwise the path is likely broken (DPI / MTU /
+			// mangling) and we'd reconnect-storm against a hostile network.
+			// Pings alone are sufficient: server-originated, AEAD-verified,
+			// so they prove the return path even on idle tunnels.
+			stats := client.Stats()
+			if stats.PingsReceived > 0 || stats.BytesReceived > 0 {
+				delay = baseDelay
+				log.Printf("openvpn connection lost, reconnecting...")
+			} else {
+				delay = backoff(delay, maxDelay)
+				log.Printf("openvpn data plane delivered no traffic; backing off %s before retry", delay)
+				sleepCtx(ctx, delay)
+			}
 		case <-ctx.Done():
 			ln.Close()
 			<-serveDone
